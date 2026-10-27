@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>اسکن زنده QR | پذیرش رویداد</title>
+  <style>
+    :root{color-scheme:light}
+    *{box-sizing:border-box}
+    body{font:15px/1.85 Tahoma,Arial,sans-serif;background:#f2f5fb;color:#192b45;margin:0;padding:18px}
+    .box{max-width:550px;margin:20px auto;background:#fff;padding:24px;border:1px solid #e0e7f0;border-radius:20px;box-shadow:0 8px 32px #142d4512}
+    h1{font-size:23px;margin:0 0 4px}label{display:block;font-weight:bold;font-size:13px;margin:16px 0 6px}
+    input{width:100%;padding:12px;border:1px solid #c6d1e1;border-radius:10px;direction:ltr;font:14px Arial,sans-serif}
+    button{background:#3e60df;color:white;padding:12px 20px;border:0;border-radius:11px;cursor:pointer;font:bold 14px Tahoma,sans-serif;min-height:44px}
+    button:disabled{opacity:.6;cursor:wait}.secondary{background:#eaf0ff;color:#344e9c}
+    .actions{display:flex;flex-wrap:wrap;gap:10px;margin:16px 0}
+    .hint{font-size:12px;color:#69798c;line-height:1.9}.msg{background:#edf2ff;border:1px solid #d3defa;border-radius:10px;padding:10px 13px;font-size:13px;white-space:pre-wrap}
+    .msg.error{background:#fff0f1;color:#9d2738;border-color:#ffd0d7}
+    .msg.ok{background:#eaf8f1;color:#08784d;border-color:#bde4d2}
+    #reader{width:100%;margin:14px 0}#nativeVideo{display:none;width:100%;height:auto;max-height:420px;object-fit:cover;border-radius:14px;background:#142538;margin-top:12px}
+    #manualArea{margin-top:18px;padding-top:10px;border-top:1px solid #e4e9f2}
+    .small-link{overflow-wrap:anywhere}
+  </style>
+</head>
+<body>
+  <main class="box">
+    <h1>اسکن QR شرکت‌کنندگان</h1>
+    <p class="hint">این صفحه را روی یک آدرس HTTPS باز کنید. بعد از اسکن به پنل پذیرش برمی‌گردید و حضور ثبت می‌شود (ورود اپراتور لازم است).</p>
+    <label for="appUrl">لینک اصلی Web App (انتهای آن /exec باشد)</label>
+    <input id="appUrl" type="url" autocomplete="off" placeholder="https://script.google.com/macros/s/.../exec">
+    <div class="actions">
+      <button id="startBtn" type="button">شروع اسکن با دوربین</button>
+      <button id="stopBtn" class="secondary" type="button" disabled>توقف دوربین</button>
+    </div>
+    <div id="message" class="msg" role="status" aria-live="polite">برای آغاز، لینک Web App را وارد کنید و «شروع اسکن» را بزنید.</div>
+    <video id="nativeVideo" playsinline muted autoplay></video>
+    <div id="reader"></div>
+    <section id="manualArea">
+      <label for="manualCode">روش جایگزین: واردکردن شناسه QR</label>
+      <input id="manualCode" autocomplete="off" placeholder="qr_id">
+      <div class="actions"><button class="secondary" id="manualBtn" type="button">ارسال شناسه به پذیرش</button></div>
+      <p class="hint">اگر شبکه همه کتابخانه‌های خارجی را مسدود کند، این گزینه همچنان کار می‌کند. بعد از هر ثبت، با بازگشت به همین صفحه نفر بعدی را اسکن کنید.</p>
+    </section>
+  </main>
+  <script>
+    'use strict';
+    const $ = id => document.getElementById(id);
+    const urls = [
+      'https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js',
+      'https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js',
+      'https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js'
+    ];
+    const appInput = $('appUrl'), msg = $('message'), startBtn = $('startBtn'), stopBtn = $('stopBtn'), video = $('nativeVideo');
+    let scanner = null, stream = null, nativeActive = false, working = false, decoded = false, tick = 0;
+    try { appInput.value = new URLSearchParams(location.search).get('app') || localStorage.getItem('qr_checkin_app') || ''; } catch (_) {}
+
+    function status(message, type='') { msg.className = 'msg' + (type ? ' ' + type : ''); msg.textContent = message; }
+    function validApp(input) {
+      try {
+        const p = new URL(input);
+        return p.protocol === 'https:' && p.hostname === 'script.google.com' && /^\/macros\/s\/[A-Za-z0-9_-]+\/exec\/?$/.test(p.pathname);
+      } catch (_) { return false; }
+    }
+    function getApp() {
+      const app = appInput.value.trim();
+      if (!validApp(app)) { status('لینک اصلی /exec از Google Apps Script را وارد کنید.', 'error'); return null; }
+      try { localStorage.setItem('qr_checkin_app', app); } catch (_) {}
+      return app;
+    }
+    function finishScan(code) {
+      if (decoded) return;
+      const app = getApp();
+      if (!app) return;
+      const clean = String(code || '').trim();
+      if (!clean || clean.length > 300) { status('شناسه QR قابل‌قبول نیست.', 'error'); return; }
+      decoded = true;
+      status('QR شناسایی شد؛ در حال انتقال به سامانه پذیرش...', 'ok');
+      const next = new URL(app);
+      next.searchParams.set('code', clean);
+      // فقط شناسه به پنل منتقل می‌شود. ثبت حضور نیازمند احراز هویت اپراتور در Apps Script است.
+      stopCamera().finally(() => { location.assign(next.toString()); });
+    }
+    function loadScript(src, timeout=7000) {
+      return new Promise((resolve,reject) => {
+        let done = false;
+        const s = document.createElement('script');
+        s.src = src; s.async = true;
+        const timer = setTimeout(() => end(new Error('timeout')), timeout);
+        function end(err) {
+          if (done) return;
+          done = true; clearTimeout(timer);
+          s.onload = null; s.onerror = null;
+          if (err) { s.remove(); reject(err); } else resolve();
+        }
+        s.onload = () => end();
+        s.onerror = () => end(new Error('blocked'));
+        document.head.appendChild(s);
+      });
+    }
+    async function loadLibrary() {
+      if (typeof window.Html5Qrcode === 'function') return;
+      for (let i=0; i<urls.length; i++) {
+        status('در حال دریافت کتابخانه اسکنر از سرور ' + (i+1) + ' از ' + urls.length + '...');
+        try {
+          await loadScript(urls[i]);
+          if (typeof window.Html5Qrcode === 'function') return;
+        } catch (_) {}
+      }
+      throw new Error('کتابخانه اسکنر از هیچ‌کدام از سه سرور دریافت نشد. احتمالاً دسترسی شبکه، DNS یا افزونه مرورگر مانع شده است. می‌توانید از ورود دستی شناسه استفاده کنید.');
+    }
+    async function stopCamera() {
+      nativeActive = false;
+      if (tick) cancelAnimationFrame(tick);
+      tick = 0;
+      if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+      video.pause(); video.srcObject = null; video.style.display = 'none';
+      if (scanner) {
+        try { await scanner.stop(); } catch (_) {}
+        try { scanner.clear(); } catch (_) {}
+        scanner = null;
+      }
+      $('reader').innerHTML = '';
+      stopBtn.disabled = true;
+      startBtn.disabled = false;
+    }
+    async function startNative() {
+      if (!('BarcodeDetector' in window) || !navigator.mediaDevices?.getUserMedia) return false;
+      let detector;
+      try { detector = new BarcodeDetector({formats:['qr_code']}); } catch (_) { return false; }
+      stream = await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:'environment'}}});
+      video.srcObject = stream; video.style.display='block'; await video.play();
+      nativeActive = true;
+      status('دوربین فعال شد. QR را مقابل دوربین نگه دارید.', 'ok');
+      let prior=0;
+      async function scanFrame(now) {
+        if (!nativeActive || decoded) return;
+        if (now-prior>220 && video.readyState>=2) {
+          prior=now;
+          try {
+            const codes = await detector.detect(video);
+            if (!nativeActive) return;
+            if (codes.length && codes[0].rawValue) { finishScan(codes[0].rawValue); return; }
+          } catch (_) {}
+        }
+        if (nativeActive) tick=requestAnimationFrame(scanFrame);
+      }
+      tick=requestAnimationFrame(scanFrame);
+      return true;
+    }
+    async function startWithLibrary() {
+      await loadLibrary();
+      scanner = new Html5Qrcode('reader');
+      await scanner.start({facingMode:'environment'}, {fps:10,qrbox:{width:240,height:240}}, finishScan, ()=>{});
+      status('دوربین فعال شد. QR را مقابل دوربین نگه دارید.', 'ok');
+    }
+    async function start() {
+      if (working) return;
+      if (!getApp()) return;
+      if (!window.isSecureContext) { status('این صفحه باید با HTTPS باز شود. بازکردن مستقیم فایل با file:// ممکن است مجوز دوربین ندهد.', 'error'); return; }
+      working=true; decoded=false; startBtn.disabled=true;
+      await stopCamera(); startBtn.disabled=true;
+      try {
+        // در مرورگرهای دارای BarcodeDetector بدون هیچ CDN خارجی اسکن می‌کنیم.
+        let nativeWorked=false;
+        try { nativeWorked=await startNative(); } catch (_) { await stopCamera(); }
+        if (!nativeWorked) await startWithLibrary();
+        stopBtn.disabled=false;
+      } catch (e) {
+        status('اسکنر راه‌اندازی نشد: '+(e?.message||String(e))+'\nدسترسی دوربین را بررسی کنید و از HTTPS استفاده کنید.', 'error');
+        await stopCamera();
+      } finally { working=false; if (!scanner && !nativeActive) startBtn.disabled=false; }
+    }
+    startBtn.addEventListener('click',start);
+    stopBtn.addEventListener('click',async()=>{await stopCamera();status('اسکن متوقف شد.');});
+    $('manualBtn').addEventListener('click',()=>finishScan($('manualCode').value));
+    $('manualCode').addEventListener('keydown',e=>{if(e.key==='Enter') finishScan(e.target.value);});
+    window.addEventListener('pagehide',()=>{void stopCamera();});
+  </script>
+</body></html>
